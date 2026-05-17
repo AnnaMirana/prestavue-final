@@ -75,8 +75,6 @@ export async function createResource(resourceName, xmlData) {
   })
   const text = await response.text()
   if (!response.ok) {
-    // PrestaShop renvoie souvent un XML d'erreur (ou du texte). On le remonte tel quel
-    // pour permettre de diagnostiquer précisément la cause.
     throw new Error(text?.trim() ? text : `Creation ${resourceName} impossible`)
   }
   return text
@@ -143,4 +141,29 @@ export async function setProductStock(productId, quantity) {
   })
   if (stockId) return updateResource('stock_availables', stockId, xml)
   return createResource('stock_availables', xml)
+}
+
+// 🔥 NOUVEAU : Endpoint personnalisé pour mettre à jour le stock avec un delta
+export async function updateStockDelta(productId, delta) {
+  const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<prestashop>
+  <stock_delta>
+    <id_product>${productId}</id_product>
+    <id_product_attribute>0</id_product_attribute>
+    <delta>${delta}</delta>
+  </stock_delta>
+</prestashop>`
+  
+  const response = await request(`${BASE_URL}/stock_deltas?ws_key=${API_KEY}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/xml' },
+    body: xml
+  })
+  
+  if (!response.ok) {
+    const error = await response.text()
+    throw new Error(`Erreur stock delta: ${error}`)
+  }
+  
+  return response
 }

@@ -19,6 +19,12 @@ const EXPECTED_COLUMNS = {
   clients: ['date', 'nom', 'email', 'pwd', 'adresse', 'achat', 'etat']
 }
 
+const REQUIRED_COLUMNS = {
+  produits: ['nom', 'reference', 'prix_ttc'],
+  details: ['reference'],
+  clients: ['nom', 'email']
+}
+
 const ORDER_STATES = {
   paid: 2,
   canceled: 6
@@ -30,7 +36,8 @@ export async function importGlobal(files, onProgress) {
     details: { success: 0, total: 0, errors: [], corrections: [] },
     clients: { success: 0, total: 0, errors: [], corrections: [] },
     orders: { success: 0, total: 0, errors: [], carts: 0 },
-    images: 0
+    images: 0,
+    criticalErrors: []
   }
 
   try {
@@ -38,16 +45,81 @@ export async function importGlobal(files, onProgress) {
     const details = normalizeRows(files.details || [])
     const clients = normalizeRows(files.clients || [])
 
-    validateColumns(products, EXPECTED_COLUMNS.produits, report.produits)
-    validateColumns(details, EXPECTED_COLUMNS.details, report.details)
-    validateColumns(clients, EXPECTED_COLUMNS.clients, report.clients)
+    // ========== ÉTAPE 1 : VALIDATION AVANT IMPORT ==========
+    onProgress?.('🔍 Validation des fichiers...')
+    
+    let hasCriticalError = false
+    const criticalErrors = []
+    
+    const validationProduits = validateColumnsCritical(products, EXPECTED_COLUMNS.produits, REQUIRED_COLUMNS.produits, report.produits)
+    const validationDetails = validateColumnsCritical(details, EXPECTED_COLUMNS.details, REQUIRED_COLUMNS.details, report.details)
+    const validationClients = validateColumnsCritical(clients, EXPECTED_COLUMNS.clients, REQUIRED_COLUMNS.clients, report.clients)
+    
+    const validationErrors = []
+    
+    for (const [index, row] of products.entries()) {
+      try {
+        if (row.date_availability_produit) {
+          validateDate(row.date_availability_produit, `produits ligne ${index + 1}`)
+        }
+        normalizePositiveAmount(row.prix_ttc, `produits ligne ${index + 1}`)
+      } catch (error) {
+        validationErrors.push(error.message)
+        hasCriticalError = true
+      }
+    }
+    
+    for (const [index, row] of clients.entries()) {
+      try {
+        if (row.date) {
+          validateDate(row.date, `clients ligne ${index + 1}`)
+        }
+        if (!row.email || !row.email.trim()) {
+          throw new Error(`clients ligne ${index + 1}: email obligatoire`)
+        }
+        if (!row.email.includes('@')) {
+          throw new Error(`clients ligne ${index + 1}: email invalide (${row.email})`)
+        }
+      } catch (error) {
+        validationErrors.push(error.message)
+        hasCriticalError = true
+      }
+    }
+    
+    // Vérifier les combinaisons interdites
+    const declinationTypesByProduct = new Map()
+    for (const row of details) {
+      const reference = row.reference
+      const currentType = row.specificite || row.karazany || null
+      
+      if (currentType) {
+        const existingType = declinationTypesByProduct.get(reference)
+        if (existingType && existingType !== currentType) {
+          validationErrors.push(`Combinaison interdite: produit ${reference} a ${existingType} et ${currentType} (taille + couleur ensemble)`)
+          hasCriticalError = true
+        }
+        if (!existingType) {
+          declinationTypesByProduct.set(reference, currentType)
+        }
+      }
+    }
+    
+    if (hasCriticalError || validationProduits === false || validationDetails === false || validationClients === false) {
+      report.criticalErrors = [...criticalErrors, ...validationErrors]
+      return {
+        success: false,
+        report,
+        message: `❌ Import annulé: ${[...criticalErrors, ...validationErrors].join(', ')}`
+      }
+    }
 
-    onProgress?.('Import des produits...')
+    // ========== ÉTAPE 2 : IMPORT DES PRODUITS ==========
+    onProgress?.('📦 Import des produits...')
     const productsMap = new Map()
+    
     for (const [index, row] of products.entries()) {
       report.produits.total++
       try {
-        validateDate(row.date_availability_produit, `produits ligne ${index + 1}`)
         const price = normalizePositiveAmount(row.prix_ttc, `produits ligne ${index + 1}`)
         const id = await upsertProduct(row, price)
         productsMap.set(row.reference, {
@@ -58,36 +130,37 @@ export async function importGlobal(files, onProgress) {
           category: row.categorie || ''
         })
         report.produits.success++
+        report.produits.corrections.push(`Ligne ${index + 1}: ${row.nom} (${row.reference}) créé - ${price}€`)
       } catch (error) {
         report.produits.errors.push(error.message)
+        throw new Error(`Import arrêté: ${error.message}`)
       }
     }
 
-    onProgress?.('Application des details et stocks...')
+    // ========== ÉTAPE 3 : MISE À JOUR DES DÉTAILS ==========
+    onProgress?.('⚙️ Application des details et stocks...')
     const finalProductsMap = await getProductsMap(productsMap)
-    const importedDeclinations = new Set()
+    
     for (const [index, row] of details.entries()) {
       report.details.total++
       try {
         const product = finalProductsMap.get(row.reference)
-        if (!product) throw new Error(`details ligne ${index + 1}: produit ${row.reference} introuvable`)
-
-        const isDeclination = Boolean(row.specificite || row.karazany)
-        if (isDeclination && importedDeclinations.has(row.reference)) {
-          report.details.corrections.push(`details ligne ${index + 1}: declinaison supplementaire ignoree`)
+        if (!product) {
+          report.details.errors.push(`details ligne ${index + 1}: produit ${row.reference} introuvable`)
           continue
         }
-        if (isDeclination) importedDeclinations.add(row.reference)
 
-        if (row.prix_vente_ttc) {
+        if (row.prix_vente_ttc && row.prix_vente_ttc.trim() !== '') {
           const price = normalizePositiveAmount(row.prix_vente_ttc, `details ligne ${index + 1}`)
           await updateProductPrice(product.id, price)
           product.price = price
+          report.details.corrections.push(`details ligne ${index + 1}: ${row.reference} - prix mis à jour: ${price}€`)
         }
 
-        if (row.stock_initial !== '') {
+        if (row.stock_initial !== '' && row.stock_initial !== null) {
           const stock = normalizePositiveInteger(row.stock_initial, `details ligne ${index + 1}`)
           await setProductStock(product.id, stock)
+          report.details.corrections.push(`details ligne ${index + 1}: ${row.reference} - stock mis à jour: ${stock}`)
         }
 
         report.details.success++
@@ -96,18 +169,24 @@ export async function importGlobal(files, onProgress) {
       }
     }
 
-    onProgress?.('Import des clients, paniers et commandes...')
+    // ========== ÉTAPE 4 : IMPORT DES CLIENTS ET COMMANDES (AVEC DATES) ==========
+    onProgress?.('👥 Import des clients et commandes...')
     const customerByEmail = new Map()
+    
     for (const [index, row] of clients.entries()) {
       report.clients.total++
       try {
-        validateDate(row.date, `clients ligne ${index + 1}`)
         const email = String(row.email || '').trim().toLowerCase()
-        if (!email) throw new Error(`clients ligne ${index + 1}: email obligatoire`)
+        
+        let finalEmail = email
+        if (customerByEmail.has(email)) {
+          const timestamp = Date.now()
+          finalEmail = email.replace('@', `.dup${timestamp}@`)
+          report.clients.corrections.push(`Ligne ${index + 1}: email dupliqué corrigé (${email} → ${finalEmail})`)
+        }
 
-        const customer =
-          customerByEmail.get(email) || (await createCustomerWithAddress(row, email, index + 1))
-        customerByEmail.set(email, customer)
+        const customer = customerByEmail.get(finalEmail) || (await createCustomerWithAddress(row, finalEmail, index + 1))
+        customerByEmail.set(finalEmail, customer)
         report.clients.success++
 
         const cartLines = parseCart(row.achat)
@@ -116,12 +195,17 @@ export async function importGlobal(files, onProgress) {
 
         const cartId = await createCart(customer, cartLines, finalProductsMap)
         const state = normalizeOrderState(row.etat)
+        
+        // 🔥 Récupérer la date du CSV
+        const orderDate = row.date || null
+        
         if (state === 'cart') {
           report.orders.carts++
           continue
         }
 
-        await createOrder(customer, cartId, cartLines, finalProductsMap, state)
+        // 🔥 Passer la date à createOrder
+        await createOrder(customer, cartId, cartLines, finalProductsMap, state, orderDate)
         report.orders.success++
       } catch (error) {
         report.clients.errors.push(error.message)
@@ -129,20 +213,62 @@ export async function importGlobal(files, onProgress) {
       }
     }
 
+    // ========== ÉTAPE 5 : IMPORT DES IMAGES ==========
     if (files.images) {
-      onProgress?.('Import des images...')
+      onProgress?.('🖼️ Import des images...')
       report.images = await importImages(files.images, finalProductsMap)
     }
+
+    const hasErrors = report.produits.errors.length > 0 || report.details.errors.length > 0 || report.clients.errors.length > 0
+    const successMessage = `✅ Produits: ${report.produits.success}/${report.produits.total} | Détails: ${report.details.success}/${report.details.total} | Clients: ${report.clients.success}/${report.clients.total} | Commandes: ${report.orders.success}/${report.orders.total} | Images: ${report.images}`
 
     return {
       success: report.produits.errors.length + report.details.errors.length + report.clients.errors.length === 0,
       report,
-      message: `Produits ${report.produits.success}/${report.produits.total}, details ${report.details.success}/${report.details.total}, clients ${report.clients.success}/${report.clients.total}, commandes ${report.orders.success}/${report.orders.total}, images ${report.images}`
+      message: successMessage
     }
   } catch (error) {
-    return { success: false, report, message: `Erreur import: ${error.message}` }
+    return {
+      success: false,
+      report,
+      message: `❌ Erreur fatale: ${error.message}`
+    }
   }
 }
+
+// ========== FONCTIONS DE VALIDATION CRITIQUE ==========
+
+function validateColumnsCritical(rows, expected, required, report) {
+  if (!rows.length) return true
+  const actual = Object.keys(rows[0]).map(k => normalizeKey(k))
+  let hasError = false
+  
+  for (const column of required) {
+    const normalizedCol = normalizeKey(column)
+    if (!actual.includes(normalizedCol)) {
+      report.criticalErrors = report.criticalErrors || []
+      report.criticalErrors.push(`Colonne obligatoire manquante: ${column}`)
+      hasError = true
+    }
+  }
+  
+  for (const column of expected) {
+    if (!actual.includes(normalizeKey(column))) {
+      report.errors.push(`Nom de colonne non conforme: ${column}`)
+    }
+  }
+  
+  return !hasError
+}
+
+function validateDate(value, context) {
+  if (!value) return
+  if (!/^\d{2}\/\d{2}\/\d{4}$/.test(value)) {
+    throw new Error(`${context}: date ${value} differente de DD/MM/YYYY`)
+  }
+}
+
+// ========== FONCTIONS UTILITAIRES ==========
 
 function normalizeRows(rows) {
   return rows.map((row) => {
@@ -160,23 +286,6 @@ function normalizeKey(key) {
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
     .trim()
-}
-
-function validateColumns(rows, expected, report) {
-  if (!rows.length) return
-  const actual = Object.keys(rows[0])
-  for (const column of expected) {
-    if (!actual.includes(normalizeKey(column))) {
-      report.errors.push(`Nom de colonne non conforme: ${column}`)
-    }
-  }
-}
-
-function validateDate(value, context) {
-  if (!value) return
-  if (!/^\d{2}\/\d{2}\/\d{4}$/.test(value)) {
-    throw new Error(`${context}: date ${value} differente de DD/MM/YYYY`)
-  }
 }
 
 function normalizeDate(value) {
@@ -312,7 +421,8 @@ async function createCart(customer, cartLines, productsMap) {
   return extractIdFromXml(await createResource('carts', xml))
 }
 
-async function createOrder(customer, cartId, cartLines, productsMap, stateId) {
+// 🔥 FONCTION CORRIGÉE avec stockage de la date dans note
+async function createOrder(customer, cartId, cartLines, productsMap, stateId, orderDate) {
   const total = cartLines.reduce((sum, line) => {
     const product = productsMap.get(line.reference)
     return sum + (Number(product?.price || 0) * line.quantity)
@@ -328,6 +438,7 @@ async function createOrder(customer, cartId, cartLines, productsMap, stateId) {
       product_price: Number(product.price || 0).toFixed(2)
     }
   })
+  
   const xml = buildXml('orders', {
     id_address_delivery: customer.addressId,
     id_address_invoice: customer.addressId,
@@ -345,6 +456,7 @@ async function createOrder(customer, cartId, cartLines, productsMap, stateId) {
     total_products: total.toFixed(2),
     total_products_wt: total.toFixed(2),
     total_shipping: '0.00',
+    note: orderDate ? `Date commande CSV: ${orderDate}` : '',  // 🔥 Stocke la date du CSV
     associations: { order_rows: { order_row: orderRows } }
   })
   return createResource('orders', xml)

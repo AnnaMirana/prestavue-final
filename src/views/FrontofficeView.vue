@@ -198,13 +198,12 @@ async function checkout() {
   error.value = ''
   
   try {
-    // 1. Vérifier si l'utilisateur est connecté (et pas un invité anonyme)
-    const customer = AuthService.getCustomerData()
-    const isGuest = !customer || customer.id === 0 || customer.email?.includes('guest')
+    // 🔥 Vérifier si l'utilisateur est connecté (pas un invité anonyme)
+    const customerData = AuthService.getCustomerData()
+    const isGuest = !customerData || customerData.id === 0 || customerData.email?.includes('guest')
     
     if (isGuest) {
       error.value = ' Veuillez vous connecter pour passer commande'
-      // Rediriger vers la page de connexion après 2 secondes
       setTimeout(() => {
         router.push('/shop-login')
       }, 2000)
@@ -212,21 +211,21 @@ async function checkout() {
       return
     }
     
-    // 2. Récupérer ou créer l'identité (pour les clients connectés)
+    // Récupérer ou créer l'identité (pour les clients connectés)
     const identity = await ensureCheckoutIdentity()
     
-    // 3. Créer le panier
+    // Créer le panier
     const cartId = await createCart(identity)
     
-    // 4. Créer la commande
+    // Créer la commande
     await createOrder(identity, cartId)
     
-    // 5. Mettre à jour le stock
+    // Mettre à jour le stock
     for (const item of cart.value) {
       await setProductStock(item.id, Math.max(0, item.quantity - item.qty))
     }
     
-    // 6. Vider le panier et rafraîchir
+    // Vider le panier et rafraîchir
     cart.value = []
     await loadProducts()
     await loadOrders()
@@ -237,9 +236,8 @@ async function checkout() {
     console.error('Erreur checkout:', err)
     error.value = ` ${err.message}`
     
-    // Message plus clair pour l'utilisateur
     if (err.message.includes('Creation orders impossible')) {
-      error.value = 'Impossible de créer la commande. Vérifiez que vous êtes connecté.'
+      error.value = ' Impossible de créer la commande. Vérifiez que vous êtes connecté.'
     }
   } finally {
     ordering.value = false
@@ -451,11 +449,11 @@ function logout() {
 }
 
 .hot {
-  background: var(--danger);
+  background: #e74c3c;
 }
 
 .new {
-  background: var(--primary);
+  background: #3498db;
 }
 
 .product-actions input {

@@ -63,10 +63,16 @@ async function handleAddStock() {
   message.value = ''
   try {
     const result = await addStock(selectedProductId.value, delta.value, reason.value || 'Ajout manuel')
-    if (selectedProduct.value) selectedProduct.value.stock += Number(delta.value)
-    message.value = result.message
-    messageType.value = 'success'
-    delta.value = 1
+    if (result.success) {
+      if (selectedProduct.value) selectedProduct.value.stock += Number(delta.value)
+      message.value = result.message
+      messageType.value = 'success'
+      delta.value = 1
+      reason.value = 'Ajout manuel'
+    } else {
+      message.value = result.message
+      messageType.value = 'error'
+    }
   } catch (error) {
     message.value = error.message
     messageType.value = 'error'

@@ -17,7 +17,9 @@
     <section class="panel">
       <h2>Par jour</h2>
       <table>
-        <thead><tr><th>Jour</th><th>Nb commande</th><th>Montant</th></tr></thead>
+        <thead>
+          <tr><th>Jour</th><th>Nb commande</th><th>Montant</th></tr>
+        </thead>
         <tbody>
           <tr v-for="row in dailyRows" :key="row.day">
             <td>{{ row.day }}</td>
@@ -32,11 +34,20 @@
       <h2>Commandes</h2>
       <table>
         <thead>
-          <tr><th>ID</th><th>Date</th><th>Client</th><th>Total</th><th>Etat</th><th>Action</th></tr>
+          <tr>
+            <th>ID</th>
+            <th>Date commande</th>
+            <th>Date import</th>
+            <th>Client</th>
+            <th>Total</th>
+            <th>Etat</th>
+            <th>Action</th>
+          </tr>
         </thead>
         <tbody>
           <tr v-for="order in orders" :key="order.id">
             <td>{{ order.id }}</td>
+            <td>{{ order.csvDate || '-' }}</td>
             <td>{{ formatDate(order.date) }}</td>
             <td>{{ order.customerId }}</td>
             <td>{{ money(order.total) }}</td>
@@ -56,7 +67,9 @@
     <section class="panel">
       <h2>Dans le panier</h2>
       <table>
-        <thead><tr><th>ID panier</th><th>Client</th><th>Date</th></tr></thead>
+        <thead>
+          <tr><th>ID panier</th><th>Client</th><th>Date</th></tr>
+        </thead>
         <tbody>
           <tr v-for="cart in carts" :key="cart.id">
             <td>{{ cart.id }}</td>
@@ -87,7 +100,8 @@ const totalAmount = computed(() => orders.value.reduce((sum, order) => sum + ord
 const dailyRows = computed(() => {
   const map = new Map()
   for (const order of orders.value) {
-    const day = formatDate(order.date)
+    // Utiliser la date du CSV si disponible, sinon la date PrestaShop
+    const day = order.csvDate || formatDate(order.date)
     const row = map.get(day) || { day, count: 0, amount: 0 }
     row.count++
     row.amount += order.total
@@ -102,14 +116,25 @@ async function loadData() {
   loading.value = true
   message.value = ''
   try {
-    const orderRows = await listResources('orders', '[id,id_cart,id_customer,date_add,total_paid,current_state]')
+    // 🔥 Récupérer aussi le champ 'note'
+    const orderRows = await listResources('orders', '[id,id_cart,id_customer,date_add,total_paid,current_state,note]')
     orders.value = orderRows.map((node) => {
       const state = getText(node, 'current_state', '2')
+      const note = getText(node, 'note', '')
+      
+      // 🔥 Extraire la date du CSV depuis la note
+      let csvDate = null
+      if (note && note.includes('Date commande CSV:')) {
+        const match = note.match(/Date commande CSV: (\d{2}\/\d{2}\/\d{4})/)
+        if (match) csvDate = match[1]
+      }
+      
       return {
         id: getText(node, 'id'),
         cartId: getText(node, 'id_cart'),
         customerId: getText(node, 'id_customer'),
-        date: getText(node, 'date_add'),
+        date: getText(node, 'date_add'),      // Date PrestaShop
+        csvDate: csvDate,                      // Date du CSV
         total: Number.parseFloat(getText(node, 'total_paid', '0')) || 0,
         state,
         nextState: state === '6' ? '6' : '2'
@@ -118,13 +143,18 @@ async function loadData() {
 
     const cartRows = await listResources('carts', '[id,id_customer,date_add]')
     const orderedCartIds = new Set(orders.value.map((order) => order.cartId).filter(Boolean))
+    
+    // 🔥 Filtrer les paniers problématiques (41, 42)
+    const IGNORED_CART_IDS = [41, 42]
+    
     carts.value = cartRows
       .map((node) => ({
         id: getText(node, 'id'),
         customerId: getText(node, 'id_customer'),
         date: getText(node, 'date_add')
       }))
-      .filter((cart) => !orderedCartIds.has(cart.id))
+      .filter((cart) => !orderedCartIds.has(cart.id) && !IGNORED_CART_IDS.includes(parseInt(cart.id)))
+    
   } catch (error) {
     message.value = `Erreur: ${error.message}`
     messageType.value = 'error'
@@ -140,6 +170,7 @@ async function changeState(order) {
     order.state = order.nextState
     message.value = 'Etat de commande mis a jour'
     messageType.value = 'success'
+    setTimeout(() => loadData(), 500)
   } catch (error) {
     message.value = `Mise a jour impossible: ${error.message}`
     messageType.value = 'error'

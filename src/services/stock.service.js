@@ -1,14 +1,14 @@
 import {
   API_KEY,
   BASE_URL,
-  buildXml,
-  createResource,
+  request,
   getProductStock,
   getText,
   listResources,
   parseXml,
-  request,
-  setProductStock,
+  updateStockDelta,
+  buildXml,
+  createResource,
   updateResource
 } from '../api/prestashop.api'
 
@@ -44,33 +44,31 @@ export async function getProductsWithStock() {
   return products
 }
 
+// 🔥 UTILISE L'ENDPOINT PERSONNALISÉ stock_deltas
 export async function addStock(productId, delta, reason = 'Ajout manuel') {
-  const currentStock = await getProductStock(productId)
-  const newStock = currentStock + Number(delta)
-  if (newStock < 0) throw new Error('Le stock ne peut pas devenir negatif')
+  try {
+    // Utiliser le nouvel endpoint stock_deltas avec delta
+    await updateStockDelta(productId, delta)
+    
+    // Récupérer le nouveau stock après mise à jour
+    const newStock = await getProductStock(productId)
+    
+    // Sauvegarder l'historique
+    saveHistory(productId, Number(delta), newStock, reason)
 
-  await setProductStock(productId, newStock)
-  saveHistory(productId, Number(delta), newStock, reason)
-
-  return {
-    success: true,
-    message: `${delta} unite(s) ajoutee(s). Nouveau stock: ${newStock}`
+    return {
+      success: true,
+      message: `${delta} unité(s) ajoutée(s). Nouveau stock: ${newStock}`
+    }
+  } catch (error) {
+    console.error('Erreur ajout stock:', error)
+    return { success: false, message: `❌ ${error.message}` }
   }
 }
 
-export async function updateStockViaCustomEndpoint(productId, delta) {
-  const xml = buildXml('stock_update', {
-    id_product: productId,
-    delta: Number(delta)
-  })
-  const response = await request(`${BASE_URL}/stock-update?ws_key=${API_KEY}`, {
-    method: 'POST',
-    body: xml
-  })
-  if (!response.ok) throw new Error(await response.text())
-  const newStock = await getProductStock(productId)
-  saveHistory(productId, Number(delta), newStock, 'Endpoint StockAvailable::updateQuantity')
-  return newStock
+// Retirer du stock (delta négatif)
+export async function removeStock(productId, delta, reason = 'Vente') {
+  return addStock(productId, -delta, reason)
 }
 
 export async function updateOrderState(orderId, stateId) {
