@@ -196,17 +196,51 @@ function resetSearch() {
 async function checkout() {
   ordering.value = true
   error.value = ''
+  
   try {
+    // 1. Vérifier si l'utilisateur est connecté (et pas un invité anonyme)
+    const customer = AuthService.getCustomerData()
+    const isGuest = !customer || customer.id === 0 || customer.email?.includes('guest')
+    
+    if (isGuest) {
+      error.value = ' Veuillez vous connecter pour passer commande'
+      // Rediriger vers la page de connexion après 2 secondes
+      setTimeout(() => {
+        router.push('/shop-login')
+      }, 2000)
+      ordering.value = false
+      return
+    }
+    
+    // 2. Récupérer ou créer l'identité (pour les clients connectés)
     const identity = await ensureCheckoutIdentity()
+    
+    // 3. Créer le panier
     const cartId = await createCart(identity)
+    
+    // 4. Créer la commande
     await createOrder(identity, cartId)
-    for (const item of cart.value) await setProductStock(item.id, Math.max(0, item.quantity - item.qty))
+    
+    // 5. Mettre à jour le stock
+    for (const item of cart.value) {
+      await setProductStock(item.id, Math.max(0, item.quantity - item.qty))
+    }
+    
+    // 6. Vider le panier et rafraîchir
     cart.value = []
     await loadProducts()
     await loadOrders()
-    alert('Commande validee. Paiement a la livraison, sans frais de livraison.')
+    
+    alert('Commande validée. Paiement à la livraison, sans frais de livraison.')
+    
   } catch (err) {
-    error.value = `Commande impossible: ${err.message}`
+    console.error('Erreur checkout:', err)
+    error.value = ` ${err.message}`
+    
+    // Message plus clair pour l'utilisateur
+    if (err.message.includes('Creation orders impossible')) {
+      error.value = 'Impossible de créer la commande. Vérifiez que vous êtes connecté.'
+    }
   } finally {
     ordering.value = false
   }
